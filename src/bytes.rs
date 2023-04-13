@@ -3,6 +3,8 @@ use core::mem::{self, ManuallyDrop};
 use core::ops::{Deref, RangeBounds};
 use core::{cmp, fmt, hash, ptr, slice, usize};
 
+use abi_stable::std_types::RVec;
+use abi_stable::StableAbi;
 use alloc::{
     alloc::{dealloc, Layout},
     borrow::Borrow,
@@ -98,6 +100,8 @@ use crate::{offset_from, Buf, BytesMut};
 /// │ Arc │     │           │               │     │
 /// └─────┴─────┴───────────┴───────────────┴─────┘
 /// ```
+#[repr(C)]
+#[derive(StableAbi)]
 pub struct Bytes {
     ptr: *const u8,
     len: usize,
@@ -106,18 +110,20 @@ pub struct Bytes {
     vtable: &'static Vtable,
 }
 
+#[repr(C)]
+#[derive(StableAbi)]
 pub(crate) struct Vtable {
     /// fn(data, ptr, len)
-    pub clone: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Bytes,
+    pub clone: unsafe extern "C" fn(&AtomicPtr<()>, *const u8, usize) -> Bytes,
     /// fn(data, ptr, len)
     ///
     /// takes `Bytes` to value
-    pub to_vec: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Vec<u8>,
-    pub to_mut: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> BytesMut,
+    pub to_vec: unsafe extern "C" fn(&AtomicPtr<()>, *const u8, usize) -> RVec<u8>,
+    pub to_mut: unsafe extern "C" fn(&AtomicPtr<()>, *const u8, usize) -> BytesMut,
     /// fn(data)
-    pub is_unique: unsafe fn(&AtomicPtr<()>) -> bool,
+    pub is_unique: unsafe extern "C" fn(&AtomicPtr<()>) -> bool,
     /// fn(data, ptr, len)
-    pub drop: unsafe fn(&mut AtomicPtr<()>, *const u8, usize),
+    pub drop: unsafe extern "C" fn(&mut AtomicPtr<()>, *const u8, usize),
 }
 
 impl Bytes {
@@ -961,8 +967,8 @@ impl From<String> for Bytes {
     }
 }
 
-impl From<Bytes> for Vec<u8> {
-    fn from(bytes: Bytes) -> Vec<u8> {
+impl From<Bytes> for RVec<u8> {
+    fn from(bytes: Bytes) -> RVec<u8> {
         let bytes = ManuallyDrop::new(bytes);
         unsafe { (bytes.vtable.to_vec)(&bytes.data, bytes.ptr, bytes.len) }
     }
@@ -989,26 +995,26 @@ const STATIC_VTABLE: Vtable = Vtable {
     drop: static_drop,
 };
 
-unsafe fn static_clone(_: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Bytes {
+unsafe extern "C" fn static_clone(_: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Bytes {
     let slice = slice::from_raw_parts(ptr, len);
     Bytes::from_static(slice)
 }
 
-unsafe fn static_to_vec(_: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Vec<u8> {
+unsafe extern "C" fn static_to_vec(_: &AtomicPtr<()>, ptr: *const u8, len: usize) -> RVec<u8> {
     let slice = slice::from_raw_parts(ptr, len);
-    slice.to_vec()
+    slice.to_vec().into()
 }
 
-unsafe fn static_to_mut(_: &AtomicPtr<()>, ptr: *const u8, len: usize) -> BytesMut {
+unsafe extern "C" fn static_to_mut(_: &AtomicPtr<()>, ptr: *const u8, len: usize) -> BytesMut {
     let slice = slice::from_raw_parts(ptr, len);
     BytesMut::from(slice)
 }
 
-fn static_is_unique(_: &AtomicPtr<()>) -> bool {
+extern "C" fn static_is_unique(_: &AtomicPtr<()>) -> bool {
     false
 }
 
-unsafe fn static_drop(_: &mut AtomicPtr<()>, _: *const u8, _: usize) {
+unsafe extern "C" fn static_drop(_: &mut AtomicPtr<()>, _: *const u8, _: usize) {
     // nothing to drop for &'static [u8]
 }
 
@@ -1030,7 +1036,11 @@ static PROMOTABLE_ODD_VTABLE: Vtable = Vtable {
     drop: promotable_odd_drop,
 };
 
-unsafe fn promotable_even_clone(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Bytes {
+unsafe extern "C" fn promotable_even_clone(
+    data: &AtomicPtr<()>,
+    ptr: *const u8,
+    len: usize,
+) -> Bytes {
     let shared = data.load(Ordering::Acquire);
     let kind = shared as usize & KIND_MASK;
 
@@ -1098,19 +1108,28 @@ unsafe fn promotable_to_mut(
     }
 }
 
-unsafe fn promotable_even_to_vec(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Vec<u8> {
+unsafe extern "C" fn promotable_even_to_vec(
+    data: &AtomicPtr<()>,
+    ptr: *const u8,
+    len: usize,
+) -> RVec<u8> {
     promotable_to_vec(data, ptr, len, |shared| {
         ptr_map(shared.cast(), |addr| addr & !KIND_MASK)
     })
+    .into()
 }
 
-unsafe fn promotable_even_to_mut(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> BytesMut {
+unsafe extern "C" fn promotable_even_to_mut(
+    data: &AtomicPtr<()>,
+    ptr: *const u8,
+    len: usize,
+) -> BytesMut {
     promotable_to_mut(data, ptr, len, |shared| {
         ptr_map(shared.cast(), |addr| addr & !KIND_MASK)
     })
 }
 
-unsafe fn promotable_even_drop(data: &mut AtomicPtr<()>, ptr: *const u8, len: usize) {
+unsafe extern "C" fn promotable_even_drop(data: &mut AtomicPtr<()>, ptr: *const u8, len: usize) {
     data.with_mut(|shared| {
         let shared = *shared;
         let kind = shared as usize & KIND_MASK;
@@ -1125,7 +1144,11 @@ unsafe fn promotable_even_drop(data: &mut AtomicPtr<()>, ptr: *const u8, len: us
     });
 }
 
-unsafe fn promotable_odd_clone(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Bytes {
+unsafe extern "C" fn promotable_odd_clone(
+    data: &AtomicPtr<()>,
+    ptr: *const u8,
+    len: usize,
+) -> Bytes {
     let shared = data.load(Ordering::Acquire);
     let kind = shared as usize & KIND_MASK;
 
@@ -1137,15 +1160,23 @@ unsafe fn promotable_odd_clone(data: &AtomicPtr<()>, ptr: *const u8, len: usize)
     }
 }
 
-unsafe fn promotable_odd_to_vec(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Vec<u8> {
-    promotable_to_vec(data, ptr, len, |shared| shared.cast())
+unsafe extern "C" fn promotable_odd_to_vec(
+    data: &AtomicPtr<()>,
+    ptr: *const u8,
+    len: usize,
+) -> RVec<u8> {
+    promotable_to_vec(data, ptr, len, |shared| shared.cast()).into()
 }
 
-unsafe fn promotable_odd_to_mut(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> BytesMut {
+unsafe extern "C" fn promotable_odd_to_mut(
+    data: &AtomicPtr<()>,
+    ptr: *const u8,
+    len: usize,
+) -> BytesMut {
     promotable_to_mut(data, ptr, len, |shared| shared.cast())
 }
 
-unsafe fn promotable_odd_drop(data: &mut AtomicPtr<()>, ptr: *const u8, len: usize) {
+unsafe extern "C" fn promotable_odd_drop(data: &mut AtomicPtr<()>, ptr: *const u8, len: usize) {
     data.with_mut(|shared| {
         let shared = *shared;
         let kind = shared as usize & KIND_MASK;
@@ -1160,7 +1191,7 @@ unsafe fn promotable_odd_drop(data: &mut AtomicPtr<()>, ptr: *const u8, len: usi
     });
 }
 
-unsafe fn promotable_is_unique(data: &AtomicPtr<()>) -> bool {
+unsafe extern "C" fn promotable_is_unique(data: &AtomicPtr<()>) -> bool {
     let shared = data.load(Ordering::Acquire);
     let kind = shared as usize & KIND_MASK;
 
@@ -1210,7 +1241,7 @@ const KIND_ARC: usize = 0b0;
 const KIND_VEC: usize = 0b1;
 const KIND_MASK: usize = 0b1;
 
-unsafe fn shared_clone(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Bytes {
+unsafe extern "C" fn shared_clone(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Bytes {
     let shared = data.load(Ordering::Relaxed);
     shallow_clone_arc(shared as _, ptr, len)
 }
@@ -1244,8 +1275,8 @@ unsafe fn shared_to_vec_impl(shared: *mut Shared, ptr: *const u8, len: usize) ->
     }
 }
 
-unsafe fn shared_to_vec(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Vec<u8> {
-    shared_to_vec_impl(data.load(Ordering::Relaxed).cast(), ptr, len)
+unsafe extern "C" fn shared_to_vec(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> RVec<u8> {
+    shared_to_vec_impl(data.load(Ordering::Relaxed).cast(), ptr, len).into()
 }
 
 unsafe fn shared_to_mut_impl(shared: *mut Shared, ptr: *const u8, len: usize) -> BytesMut {
@@ -1283,17 +1314,17 @@ unsafe fn shared_to_mut_impl(shared: *mut Shared, ptr: *const u8, len: usize) ->
     }
 }
 
-unsafe fn shared_to_mut(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> BytesMut {
+unsafe extern "C" fn shared_to_mut(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> BytesMut {
     shared_to_mut_impl(data.load(Ordering::Relaxed).cast(), ptr, len)
 }
 
-pub(crate) unsafe fn shared_is_unique(data: &AtomicPtr<()>) -> bool {
+pub(crate) unsafe extern "C" fn shared_is_unique(data: &AtomicPtr<()>) -> bool {
     let shared = data.load(Ordering::Acquire);
     let ref_cnt = (*shared.cast::<Shared>()).ref_cnt.load(Ordering::Relaxed);
     ref_cnt == 1
 }
 
-unsafe fn shared_drop(data: &mut AtomicPtr<()>, _ptr: *const u8, _len: usize) {
+unsafe extern "C" fn shared_drop(data: &mut AtomicPtr<()>, _ptr: *const u8, _len: usize) {
     data.with_mut(|shared| {
         release_shared(shared.cast());
     });
