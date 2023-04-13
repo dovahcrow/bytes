@@ -97,6 +97,7 @@ use crate::Buf;
 /// │ Arc │     │           │               │     │
 /// └─────┴─────┴───────────┴───────────────┴─────┘
 /// ```
+#[repr(C)]
 pub struct Bytes {
     ptr: *const u8,
     len: usize,
@@ -105,6 +106,7 @@ pub struct Bytes {
     vtable: &'static Vtable,
 }
 
+#[repr(C)]
 pub(crate) struct Vtable {
     /// fn(data, ptr, len)
     pub clone: unsafe fn(&AtomicPtr<()>, *const u8, usize) -> Bytes,
