@@ -4,6 +4,7 @@ use core::ops::{Deref, DerefMut};
 use core::ptr::{self, NonNull};
 use core::{cmp, fmt, hash, isize, slice, usize};
 
+use abi_stable::std_types::RVec;
 use alloc::{
     borrow::{Borrow, BorrowMut},
     boxed::Box,
@@ -1702,7 +1703,7 @@ static SHARED_VTABLE: Vtable = Vtable {
     drop: shared_v_drop,
 };
 
-unsafe fn shared_v_clone(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Bytes {
+unsafe extern "C" fn shared_v_clone(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Bytes {
     let shared = data.load(Ordering::Relaxed) as *mut Shared;
     increment_shared(shared);
 
@@ -1710,7 +1711,7 @@ unsafe fn shared_v_clone(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> By
     Bytes::with_vtable(ptr, len, data, &SHARED_VTABLE)
 }
 
-unsafe fn shared_v_to_vec(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> Vec<u8> {
+unsafe extern "C" fn shared_v_to_vec(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> RVec<u8> {
     let shared: *mut Shared = data.load(Ordering::Relaxed).cast();
 
     if (*shared).is_unique() {
@@ -1730,9 +1731,10 @@ unsafe fn shared_v_to_vec(data: &AtomicPtr<()>, ptr: *const u8, len: usize) -> V
         release_shared(shared);
         v
     }
+    .into()
 }
 
-unsafe fn shared_v_drop(data: &mut AtomicPtr<()>, _ptr: *const u8, _len: usize) {
+unsafe extern "C" fn shared_v_drop(data: &mut AtomicPtr<()>, _ptr: *const u8, _len: usize) {
     data.with_mut(|shared| {
         release_shared(*shared as *mut Shared);
     });
